@@ -26,7 +26,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
     "traceflow.queue.enabled=false","traceflow.ai.model=wire-test","traceflow.ai.response-format=json_object","traceflow.ai.timeout-seconds=15"})
 @org.springframework.test.annotation.DirtiesContext(classMode=org.springframework.test.annotation.DirtiesContext.ClassMode.AFTER_CLASS)
 @AutoConfigureMockMvc
-class LlmWorkflowIntegrationTest {
+class LlmWorkflowIntegrationTest extends AuthenticatedTestSupport {
     record Reply(int status,String body,CountDownLatch entered,CountDownLatch release){}
     static final ObjectMapper WIRE_JSON=new ObjectMapper();
     static final BlockingQueue<Reply> REPLIES=new LinkedBlockingQueue<>();
@@ -71,11 +71,11 @@ class LlmWorkflowIntegrationTest {
  @Autowired ExtractionQueue queue;
     @BeforeEach void clean(){
         REPLIES.clear();REQUESTS.clear();CALLS.set(0);
-        db.execute("TRUNCATE task_change,change_proposal,extraction_job,source_document,task,project CASCADE");
+        db.execute("TRUNCATE task_change,change_proposal,extraction_job,source_document,task,project CASCADE");mvc=authenticatedMvc();
     }
     JsonNode send(org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder request,Object body,int status)throws Exception{
         if(body!=null)request.contentType("application/json").content(json.writeValueAsString(body));
-          JsonNode received=json.readTree(mvc.perform(request).andExpect(status().is(status)).andReturn().getResponse().getContentAsString());
+          JsonNode received=json.readTree(mvc.perform(request).andExpect(status().is(status)).andReturn().getResponse().getContentAsString());restoreIdentity();
   if(status==202&&"QUEUED".equals(received.path("jobs").get(received.path("jobs").size()-1).path("status").asText())){
    var lease=queue.claim("regression-driver").orElseThrow();queue.execute(lease);
    var refreshed=send(get("/api/documents/"+received.path("id").asText()),null,200);

@@ -22,12 +22,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest(properties={"traceflow.ai.mode=mock","traceflow.queue.enabled=false","traceflow.queue.retry-base-ms=200","traceflow.queue.retry-max-ms=2000"})
 @AutoConfigureMockMvc
 @DirtiesContext(classMode=DirtiesContext.ClassMode.AFTER_CLASS)
-class QueueIntegrationTest {
+class QueueIntegrationTest extends AuthenticatedTestSupport {
     @DynamicPropertySource static void database(DynamicPropertyRegistry registry){TestDatabase.register(registry);}
     @Autowired TraceFlowService service;@Autowired ExtractionQueue queue;@Autowired JdbcTemplate db;
     @Autowired ObjectMapper json;@Autowired TaskExtractor extractor;@Autowired PlatformTransactionManager manager;
     @Autowired MockMvc mvc;
-    @BeforeEach void clean(){db.execute("TRUNCATE task_change,change_proposal,extraction_job,source_document,task,project CASCADE");}
+    @BeforeEach void clean(){db.execute("TRUNCATE task_change,change_proposal,extraction_job,source_document,task,project CASCADE");mvc=authenticatedMvc();}
     UUID project(){return (UUID)service.createProject(new Contracts.ProjectInput("P4","Asia/Hong_Kong")).get("id");}
     UUID enqueue(UUID project,String text){return (UUID)service.importDocument(project,new Contracts.DocumentInput("纪要",text,LocalDate.of(2026,11,11))).get("id");}
     UUID enqueue(){return enqueue(project(),"新增任务：接口联调；负责人：李明；截止：2026-11-13");}

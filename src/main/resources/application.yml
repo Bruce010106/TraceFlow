@@ -3,6 +3,14 @@ server:
   port: ${TRACEFLOW_PORT:8080}
   error:
     include-message: never
+  servlet:
+    session:
+      timeout: 30m
+      tracking-modes: cookie
+      cookie:
+        http-only: true
+        same-site: lax
+        secure: ${TRACEFLOW_SESSION_SECURE:false}
 spring:
   config:
     import: optional:file:.local/ai.properties

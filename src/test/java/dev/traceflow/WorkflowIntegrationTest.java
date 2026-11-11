@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @SpringBootTest(properties={"traceflow.ai.mode=mock","traceflow.queue.enabled=false"})
 @org.springframework.test.annotation.DirtiesContext(classMode=org.springframework.test.annotation.DirtiesContext.ClassMode.AFTER_CLASS)
 @AutoConfigureMockMvc
-class WorkflowIntegrationTest {
+class WorkflowIntegrationTest extends AuthenticatedTestSupport {
  static final EmbeddedPostgres PG=TestDatabase.pg();
  static EmbeddedPostgres start() {
   try { return EmbeddedPostgres.builder().setPort(0).setPGStartupWait(java.time.Duration.ofSeconds(120)).setServerConfig("max_connections","20").setServerConfig("shared_buffers","16MB").setLocaleConfig("locale","C").setConnectConfig("sslmode","disable").setConnectConfig("gssEncMode","disable").start(); }
@@ -36,10 +36,10 @@ class WorkflowIntegrationTest {
  @Autowired JdbcTemplate db;
  @Autowired TraceFlowService service;
  @Autowired ExtractionQueue queue;
- @BeforeEach void clean() { db.execute("TRUNCATE task_change,change_proposal,extraction_job,source_document,task,project CASCADE"); }
+ @BeforeEach void clean() { db.execute("TRUNCATE task_change,change_proposal,extraction_job,source_document,task,project CASCADE");mvc=authenticatedMvc(); }
  JsonNode send(org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder request,Object body,int status) throws Exception {
   if(body!=null) request.contentType("application/json").content(json.writeValueAsString(body));
-    JsonNode received=json.readTree(mvc.perform(request).andExpect(status().is(status)).andReturn().getResponse().getContentAsString());
+    JsonNode received=json.readTree(mvc.perform(request).andExpect(status().is(status)).andReturn().getResponse().getContentAsString());restoreIdentity();
   if(status==202&&"QUEUED".equals(received.path("jobs").get(received.path("jobs").size()-1).path("status").asText())){
    var lease=queue.claim("regression-driver").orElseThrow();queue.execute(lease);
    var refreshed=send(get("/api/documents/"+received.path("id").asText()),null,200);

@@ -1,0 +1,319 @@
+{
+  "info": {
+    "name": "TraceFlow P5 authentication",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Local HTTP contract regression. Creates one isolated QA account and project, never modifies existing projects. Spring Security integration tests cover the complete role/resource matrix."
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8091"
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "if (!pm.collectionVariables.get('qaUsername')) { const id=pm.variables.replaceIn('{{$guid}}').replace(/-/g,''); pm.collectionVariables.set('qaUsername','postman_'+id.slice(0,16)); pm.collectionVariables.set('qaPassword',id+'-qa'); }"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "Anonymous project access denied",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/projects"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Initialize CSRF",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/auth/csrf"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+              "const data = pm.response.json(); pm.collectionVariables.set('csrf', data.token);",
+              "pm.test('CSRF initialized', () => pm.expect(pm.response.json().headerName).to.eql('X-CSRF-TOKEN'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Register isolated QA account",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-CSRF-TOKEN",
+            "value": "{{csrf}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/auth/register",
+        "body": {
+          "mode": "raw",
+          "raw": "{\"username\": \"{{qaUsername}}\", \"password\": \"{{qaPassword}}\"}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+              "pm.test('No password in response', () => pm.expect(pm.response.json()).not.to.have.property('password_hash'));",
+              "pm.collectionVariables.set('qaUserId',pm.response.json().id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Login",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-CSRF-TOKEN",
+            "value": "{{csrf}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/auth/login",
+        "body": {
+          "mode": "raw",
+          "raw": "{\"username\": \"{{qaUsername}}\", \"password\": \"{{qaPassword}}\"}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Refresh CSRF after login",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/auth/csrf"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+              "const data = pm.response.json(); pm.collectionVariables.set('csrf', data.token);",
+              "pm.test('CSRF initialized', () => pm.expect(pm.response.json().headerName).to.eql('X-CSRF-TOKEN'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Current user",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/auth/me"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+              "pm.test('Authenticated identity',()=>pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('qaUserId')));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Create owned QA project",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-CSRF-TOKEN",
+            "value": "{{csrf}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/projects",
+        "body": {
+          "mode": "raw",
+          "raw": "{\"name\": \"P5 Postman QA\", \"timezone\": \"Asia/Hong_Kong\"}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+              "pm.test('Creator is owner',()=>pm.expect(pm.response.json().role).to.eql('OWNER'));",
+              "pm.collectionVariables.set('qaProjectId',pm.response.json().id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Read members",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/projects/{{qaProjectId}}/members"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+              "pm.test('One owner, no password',()=>{const m=pm.response.json();pm.expect(m.length).to.eql(1);pm.expect(m[0].role).to.eql('OWNER');pm.expect(m[0]).not.to.have.property('password_hash');});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Missing CSRF blocks write",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/api/projects",
+        "body": {
+          "mode": "raw",
+          "raw": "{\"name\": \"Blocked\", \"timezone\": \"UTC\"}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));",
+              "pm.test('CSRF error code',()=>pm.expect(pm.response.json().code).to.eql('CSRF_INVALID'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Logout invalidates session",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-CSRF-TOKEN",
+            "value": "{{csrf}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/auth/logout"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Logged-out session denied",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/auth/me"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

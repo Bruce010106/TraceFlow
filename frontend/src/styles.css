@@ -12,3 +12,20 @@
 .extraction-notice{display:flex;align-items:center;gap:13px;background:#edf3e7;border:1px solid #dce7d3;border-radius:10px;padding:17px 20px;margin:0 0 23px;color:#4c7451}.extraction-notice.failed{background:#fcf4ea;border-color:#eedbc6;color:#906c43}.extraction-icon{flex-shrink:0}.extraction-notice>div{flex:1;min-width:0}.extraction-notice strong{font-size:12px;font-weight:600}.extraction-notice p{font-size:11px;margin-top:3px;overflow-wrap:anywhere}.extraction-notice>.button{flex-shrink:0}@media(max-width:760px){.extraction-notice{padding:15px;gap:10px;flex-wrap:wrap;align-items:flex-start}.extraction-notice>div{flex-basis:calc(100% - 40px)}.extraction-notice>.button{margin-left:30px}.extraction-notice p{font-size:10px}}
 .toast{pointer-events:none}.toast .icon-button{pointer-events:auto}
 .attempt-summary{opacity:.8}.attempt-details{font-size:11px;margin-top:9px}.attempt-details summary{cursor:pointer;width:fit-content}.attempt-details ul{padding:0;margin:10px 0 0;list-style:none;display:grid;gap:8px}.attempt-details li{display:flex;flex-direction:column;border-left:2px solid #cbdcc0;padding-left:10px;gap:3px}.attempt-details li strong{font-size:10px}.attempt-details li span{font-size:10px;opacity:.8;overflow-wrap:anywhere}
+fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.auth-page { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.auth-card { width: min(440px,100%); padding: 36px; }
+.auth-card form { margin: 24px 0; }
+.auth-card label, .members-panel label { display: block; margin: 18px 0 8px; }
+.auth-card input, .members-panel input, .members-panel select { width: 100%; }
+.auth-card .full { margin-top: 20px; }
+.role-note { color: var(--muted); margin: 0 0 18px; font-size: 13px; }
+.members-panel { max-width: 800px; padding: 28px; }
+.member-list { padding: 0; list-style: none; }
+.member-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 16px 0; border-bottom: 1px solid #e4e8e3; }
+.member-list li > strong { overflow-wrap: anywhere; }
+.member-list li > div { display: flex; flex-wrap: wrap; gap: 10px; margin-left: auto; }
+.member-list li select { width: auto; }
+.members-panel form > button { margin-top: 20px; }
+.account-name { max-width: 150px; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+@media(max-width: 600px) { .auth-card { padding: 24px; } .topbar-right { gap: 8px; } .topbar-right .connection { display: none; } .account-name { max-width: 90px; } .members-panel { padding: 18px; } }

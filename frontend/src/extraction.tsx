@@ -32,7 +32,7 @@ const messages: Record<string, string> = {
   TOO_MANY_PROPOSALS: '建议超过 20 条，请拆分记录后重新导入。',
 };
 const attemptLabels: Record<string, string> = { RUNNING: '处理中', SUCCEEDED: '成功', FAILED: '失败', EXPIRED: '处理中断', ABANDONED: '服务停止' };
-export function ExtractionStatus({ job, onRetry, pending, timezone }: { job?: ExtractionJob; onRetry: () => void; pending: boolean; timezone: string }) {
+export function ExtractionStatus({ job, onRetry, pending, timezone }: { job?: ExtractionJob; onRetry?: () => void; pending: boolean; timezone: string }) {
   if (!job) return null;
   const failed = job.status === 'FAILED';
   const processing = job.status === 'RUNNING' || pending;
@@ -45,6 +45,6 @@ export function ExtractionStatus({ job, onRetry, pending, timezone }: { job?: Ex
     <div><strong>{title}</strong><p>{detail}</p><p className="attempt-summary">{job.generation > 1 ? '第 ' + job.generation + ' 轮 · ' : ''}{job.attempt_count ? '已尝试 ' + job.attempt_count + ' / ' + job.max_attempts + ' 次' : '尚未开始 · 最多 ' + job.max_attempts + ' 次尝试'}</p>
       {job.attempts?.length ? <details className="attempt-details"><summary>查看后台尝试记录</summary><ul>{job.attempts.map(attempt => <li key={attempt.attempt_no}><strong>第 {attempt.attempt_no} 次 · {attemptLabels[attempt.status] || attempt.status}</strong><span>{time(attempt.started_at, timezone)}{attempt.error_code ? ' · ' + (messages[attempt.error_code] || '本次未完成') : ''}</span></li>)}</ul></details> : null}
     </div>
-    {failed ? <button className="button small secondary" onClick={onRetry} disabled={pending}>{pending ? <LoaderCircle size={15} className="spin"/> : <RefreshCw size={15}/>}重新抽取</button> : null}
+    {failed && onRetry ? <button className="button small secondary" onClick={onRetry} disabled={pending}>{pending ? <LoaderCircle size={15} className="spin"/> : <RefreshCw size={15}/>}重新抽取</button> : null}
   </div>;
 }

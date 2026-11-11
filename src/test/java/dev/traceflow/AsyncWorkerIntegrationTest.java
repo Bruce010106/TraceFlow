@@ -27,7 +27,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
     "traceflow.queue.retry-base-ms=200","traceflow.queue.retry-max-ms=1000"})
 @AutoConfigureMockMvc
 @DirtiesContext(classMode=DirtiesContext.ClassMode.AFTER_CLASS)
-class AsyncWorkerIntegrationTest {
+class AsyncWorkerIntegrationTest extends AuthenticatedTestSupport {
     @DynamicPropertySource static void database(DynamicPropertyRegistry registry){TestDatabase.register(registry);}
     @TestConfiguration static class Config {
         @Bean @Primary ControlledExtractor controlledExtractor(ObjectMapper json){return new ControlledExtractor(json);}
@@ -52,7 +52,7 @@ class AsyncWorkerIntegrationTest {
     @Autowired ControlledExtractor model;@Autowired JdbcTemplate db;@Autowired ObjectMapper json;@Autowired MockMvc mvc;
     @BeforeEach void clean(){
         worker.close();model.release.countDown();
-        db.execute("TRUNCATE task_change,change_proposal,extraction_job,source_document,task,project CASCADE");
+        db.execute("TRUNCATE task_change,change_proposal,extraction_job,source_document,task,project CASCADE");mvc=authenticatedMvc();
         model.reset();worker.start();
     }
     @AfterEach void stop(){model.release.countDown();worker.close();}

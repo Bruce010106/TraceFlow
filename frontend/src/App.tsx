@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, Route, Routes, useMatch, useNavigate, useOutletContext } from 'react-router-dom';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowUpRight, CheckCircle2, FolderKanban, History, Inbox, Menu, PanelLeftClose, ShieldCheck, Upload, X } from 'lucide-react';
 import { api } from './api';
 import { Badge, Empty, ErrorPanel, Loading } from './components';
-import type { Project } from './types';
+import { AuthGate, clearWorkspace } from './Auth';
+import { MembersPage, roleLabels } from './Members';
+import type { User, Project } from './types';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { ImportPage } from './pages/ImportPage';
 import { ReviewPage } from './pages/ReviewPage';
@@ -12,6 +14,8 @@ import { TasksPage } from './pages/TasksPage';
 export interface Workspace { projects: Project[]; project?: Project; notify: (message: string) => void; refresh: () => Promise<void> }
 export const useWorkspace = () => useOutletContext<Workspace>();
 function Shell() {
+  const me = useQuery<User>({ queryKey: ['me'], queryFn: api.me });
+  const logout = useMutation({ mutationFn: api.logout, onSuccess: async () => { await clearWorkspace(cache); cache.setQueryData(['me'], null); navigate('/'); } });
   const query = useQuery({ queryKey: ['projects'], queryFn: api.projects, refetchInterval: query => query.state.data?.some(project => project.active_job_count > 0) ? 1500 : false });
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, refetchInterval: 15000 });
   const cache = useQueryClient();
@@ -28,7 +32,7 @@ function Shell() {
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(''), 6500); return () => clearTimeout(timer); }, [toast]);
   const base = selected ? '/projects/' + selected.id : '';
   const refresh = async () => { await Promise.all([cache.invalidateQueries({ queryKey: ['projects'] }), cache.invalidateQueries({ queryKey: ['documents'] }), cache.invalidateQueries({ queryKey: ['tasks'] })]); };
-  const nav = [{ to: '/', label: '项目空间', icon: FolderKanban, end: true }, { to: base ? base + '/import' : '/', label: '文档导入', icon: Upload, end: false }, { to: base ? base + '/review' : '/', label: '建议审核', icon: Inbox, end: false }, { to: base ? base + '/tasks' : '/', label: '任务历史', icon: History, end: false }];
+  const nav = [{ to: '/', label: '项目空间', icon: FolderKanban, end: true }, { to: base ? base + '/import' : '/', label: '文档导入', icon: Upload, end: false }, { to: base ? base + '/review' : '/', label: '建议审核', icon: Inbox, end: false }, { to: base ? base + '/tasks' : '/', label: '任务历史', icon: History, end: false }, { to: base ? base + '/members' : '/', label: '项目成员', icon: ShieldCheck, end: false }];
   return <div className="app">
     {menuOpen ? <button className="sidebar-scrim" aria-label="关闭导航遮罩" onClick={() => setMenuOpen(false)}/> : null}
     <aside id="main-sidebar" className={'sidebar ' + (menuOpen ? 'open' : '')}>
@@ -39,12 +43,12 @@ function Shell() {
       <div className="sidebar-note"><ShieldCheck size={21}/><strong>每一次确认，都留有来处。</strong><p>原始记录、审核决定和任务历史，始终关联在一起。</p><span>记录 → 核对 → 确认 → 追溯</span></div>
       <div className="sidebar-footer"><span className="tiny-dot"/>个人工作空间<Badge tone="green">本机</Badge></div>
     </aside>
-    <div className="main-shell"><div className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" aria-label={menuOpen ? '收起导航' : '展开导航'} aria-expanded={menuOpen} aria-controls="main-sidebar" onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <PanelLeftClose size={20}/> : <Menu size={20}/>}</button><Link to="/">工作空间</Link><span>/</span><strong>{project?.name || '项目总览'}</strong></div><div className="topbar-right"><span className={'connection ' + (health.isError ? 'offline' : '')}><span/>{health.isError ? '服务未连接' : health.isPending ? '连接中' : '服务已连接'}</span><span title={health.data?.model}><Badge tone={health.data?.configured ? 'green' : 'amber'}>{health.data?.extractor === 'mock' ? '离线示例' : health.data?.configured ? health.data.provider === 'deepseek' ? 'DeepSeek' : '真实模型' : '模型未配置'}</Badge></span><span className="user-avatar" title="个人工作空间">T</span></div></div>
-      <main id="main-content">{query.isPending ? <Loading text="正在打开工作空间…"/> : query.isError ? <ErrorPanel error={query.error} retry={() => { void query.refetch(); }}/> : projectId && !project ? query.isFetching ? <Loading/> : <Empty title="没有找到这个项目" description="项目可能已被移除，请回到项目空间重新选择。" action={<Link className="button primary" to="/">返回项目空间</Link>}/> : <Outlet context={{ projects, project, notify: setToast, refresh } satisfies Workspace}/>}
+    <div className="main-shell"><div className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" aria-label={menuOpen ? '收起导航' : '展开导航'} aria-expanded={menuOpen} aria-controls="main-sidebar" onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <PanelLeftClose size={20}/> : <Menu size={20}/>}</button><Link to="/">工作空间</Link><span>/</span><strong>{project?.name || '项目总览'}</strong></div><div className="topbar-right"><span className={'connection ' + (health.isError ? 'offline' : '')}><span/>{health.isError ? '服务未连接' : health.isPending ? '连接中' : '服务已连接'}</span><span title={health.data?.model}><Badge tone={health.data?.configured ? 'green' : 'amber'}>{health.data?.extractor === 'mock' ? '离线示例' : health.data?.configured ? health.data.provider === 'deepseek' ? 'DeepSeek' : '真实模型' : '模型未配置'}</Badge></span><span className="account-name">{me.data?.username}</span><button className="text-button" onClick={() => logout.mutate()} disabled={logout.isPending}>退出登录</button></div></div>
+      <main id="main-content">{logout.isError ? <ErrorPanel error={logout.error}/> : null}{project ? <p className="role-note">当前权限：{roleLabels[project.role]}{project.role === 'VIEWER' ? ' · 可以查看记录与历史，写入需联系项目所有者。' : ''}</p> : null}{query.isPending ? <Loading text="正在打开工作空间…"/> : query.isError ? <ErrorPanel error={query.error} retry={() => { void query.refetch(); }}/> : projectId && !project ? query.isFetching ? <Loading/> : <Empty title="没有找到这个项目" description="项目可能已被移除，请回到项目空间重新选择。" action={<Link className="button primary" to="/">返回项目空间</Link>}/> : <Outlet context={{ projects, project, notify: setToast, refresh } satisfies Workspace}/>}
       </main><footer className="page-footer"><span>TraceFlow · 让项目进展，清晰可溯。</span><span><CheckCircle2 size={13}/>变更由你确认</span></footer>
     </div>
     {toast ? <div className="toast" role="status"><CheckCircle2 size={19}/><span>{toast}</span><button className="icon-button" aria-label="关闭通知" onClick={() => setToast('')}><X size={16}/></button></div> : null}
   </div>;
 }
 function NotFound() { return <Empty title="这一页还没有记录" description="回到项目空间，继续你的工作。" action={<Link to="/" className="button primary">返回项目空间<ArrowUpRight size={16}/></Link>}/>; }
-export function App() { return <Routes><Route element={<Shell/>}><Route index element={<ProjectsPage/>}/><Route path="/projects/:projectId/import" element={<ImportPage/>}/><Route path="/projects/:projectId/review" element={<ReviewPage/>}/><Route path="/projects/:projectId/review/:documentId" element={<ReviewPage/>}/><Route path="/projects/:projectId/tasks" element={<TasksPage/>}/><Route path="*" element={<NotFound/>}/></Route></Routes>; }
+export function App() { return <AuthGate><Routes><Route element={<Shell/>}><Route index element={<ProjectsPage/>}/><Route path="/projects/:projectId/import" element={<ImportPage/>}/><Route path="/projects/:projectId/review" element={<ReviewPage/>}/><Route path="/projects/:projectId/review/:documentId" element={<ReviewPage/>}/><Route path="/projects/:projectId/tasks" element={<TasksPage/>}/><Route path="/projects/:projectId/members" element={<MembersPage/>}/><Route path="*" element={<NotFound/>}/></Route></Routes></AuthGate>; }

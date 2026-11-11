@@ -1,7 +1,12 @@
 param([string]$BaseUrl = 'http://127.0.0.1:8091')
 $ErrorActionPreference = 'Stop'
+$session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 function Call-Api([string]$Method,[string]$Path,$Body) {
-    $argsForApi = @{ Method=$Method; Uri="$BaseUrl/api$Path"; ContentType='application/json; charset=utf-8'; TimeoutSec=105 }
+    $argsForApi = @{ Method=$Method; Uri="$BaseUrl/api$Path"; ContentType='application/json; charset=utf-8'; TimeoutSec=105; WebSession=$session }
+    if ($Method -ne 'GET') {
+        $csrf = Invoke-RestMethod -Uri "$BaseUrl/api/auth/csrf" -WebSession $session
+        $argsForApi.Headers = @{ $csrf.headerName = $csrf.token }
+    }
     if ($null -ne $Body) { $argsForApi.Body = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 12 -Compress)) }
     Invoke-RestMethod @argsForApi
 }
@@ -23,6 +28,16 @@ function Wait-Extraction($Document,[int]$WaitSeconds=300) {
     }
 }
 
+$username=$env:TRACEFLOW_SMOKE_USERNAME
+$password=$env:TRACEFLOW_SMOKE_PASSWORD
+if ([bool]$username -ne [bool]$password) { throw 'Set both TRACEFLOW_SMOKE_USERNAME and TRACEFLOW_SMOKE_PASSWORD, or neither for an isolated QA account' }
+if (-not $username) {
+    $username='smoke_'+[Guid]::NewGuid().ToString('N').Substring(0,16)
+    $password=[Guid]::NewGuid().ToString('N')+'-qa'
+    Call-Api POST '/auth/register' @{username=$username;password=$password} | Out-Null
+}
+Call-Api POST '/auth/login' @{username=$username;password=$password} | Out-Null
+try {
 $health=Call-Api GET '/health' $null
 $live=$health.extractor -eq 'llm'
 Check ($health.configured -eq $true) 'Configure the model and restart backend first'
@@ -63,3 +78,6 @@ $history=Call-Api GET "/tasks/$($task.id)/history" $null
 $evidence=@($history | Where-Object {$_.after_json.version -eq 2})[0]
 Check ($history.Count -eq 3 -and $evidence.document_id -eq $update.id) 'History evidence failed'
 Write-Output ("PASS: "+$health.provider+"/"+$health.model+"; async enqueue, background extraction, relative date, dedup, review, stale 409, re-review, replay and evidence history. Project="+$project.id)
+
+Check (@($history | Where-Object {$_.actor_username -ne $username.ToLowerInvariant()}).Count -eq 0) 'History actor attribution failed'
+} finally { Call-Api POST '/auth/logout' $null | Out-Null; $password=$null }

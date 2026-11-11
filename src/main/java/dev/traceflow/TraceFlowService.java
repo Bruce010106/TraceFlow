@@ -18,8 +18,9 @@ public class TraceFlowService {
     private final TaskExtractor extractor;
     private final ExtractionQueue queue;
     private final QueueProperties queueConfig;
-    public TraceFlowService(JdbcTemplate db,ObjectMapper json,TaskExtractor extractor,ExtractionQueue queue,QueueProperties queueConfig) {
-        this.db=db;this.json=json;this.extractor=extractor;this.queue=queue;this.queueConfig=queueConfig;
+    private final ProjectAccess access;
+    public TraceFlowService(JdbcTemplate db,ObjectMapper json,TaskExtractor extractor,ExtractionQueue queue,QueueProperties queueConfig,ProjectAccess access) {
+        this.db=db;this.json=json;this.extractor=extractor;this.queue=queue;this.queueConfig=queueConfig;this.access=access;
     }
     private Map<String,Object> one(String sql,Object... args) {
         var rows=db.queryForList(sql,args);
@@ -45,30 +46,32 @@ public class TraceFlowService {
         result.put("title",title.strip()); result.put("assigneeName",owner); result.put("dueDate",date);
         return result;
     }
-    private void lockProject(UUID id) { one("SELECT * FROM project WHERE id=? FOR UPDATE",id); }
+    private void lockProject(UUID id) { one("SELECT * FROM project WHERE id=? FOR UPDATE",id);access.require(id,true); }
     private UUID uuid(Object value) { return UUID.fromString(value.toString()); }
     private void history(UUID taskId,UUID proposal,Map<String,Object> before,Map<String,Object> after,String actor) {
-        db.update("INSERT INTO task_change(id,task_id,proposal_id,actor_type,before_json,after_json) VALUES(?,?,?,?,?::jsonb,?::jsonb)",
-            UUID.randomUUID(),taskId,proposal,actor,before==null?null:encode(before),encode(after));
+        db.update("INSERT INTO task_change(id,task_id,proposal_id,actor_type,before_json,after_json,actor_user_id) VALUES(?,?,?,?,?::jsonb,?::jsonb,?)",
+            UUID.randomUUID(),taskId,proposal,actor,before==null?null:encode(before),encode(after),access.userId());
     }
     @Transactional
     public Map<String,Object> createProject(ProjectInput input) {
         try { ZoneId.of(input.timezone()); } catch(DateTimeException e) {
             throw new ApiException(400,"INVALID_TIMEZONE","无效的时区");
         }
+        UUID user=access.userId();
         UUID id=UUID.randomUUID();
         db.update("INSERT INTO project(id,name,timezone) VALUES(?,?,?)",id,input.name().strip(),input.timezone());
-        return one("SELECT * FROM project WHERE id=?",id);
+        db.update("INSERT INTO project_member(project_id,user_id,role) VALUES(?,?,'OWNER')",id,user);
+        var result=one("SELECT * FROM project WHERE id=?",id);result.put("role","OWNER");return result;
     }
     public List<Map<String,Object>> projects() {
         return db.queryForList("""
-            SELECT p.*,
+            SELECT p.*,m.role,
               (SELECT count(*) FROM source_document d WHERE d.project_id=p.id) AS document_count,
               (SELECT count(*) FROM task t WHERE t.project_id=p.id AND t.archived_at IS NULL) AS task_count,
               (SELECT count(*) FROM change_proposal c WHERE c.project_id=p.id AND c.status='PENDING') AS pending_count,
               (SELECT count(*) FROM extraction_job j JOIN source_document d ON d.id=j.document_id WHERE d.project_id=p.id AND j.status IN ('QUEUED','RUNNING','RETRY_WAIT')) AS active_job_count
-            FROM project p ORDER BY p.created_at,p.id
-            """);
+            FROM project p JOIN project_member m ON m.project_id=p.id WHERE m.user_id=? ORDER BY p.created_at,p.id
+            """,access.userId());
     }
 
     /** Only durable enqueueing happens in this request transaction. */
@@ -86,8 +89,8 @@ public class TraceFlowService {
             var result=document(uuid(existing.get(0).get("id")));result.put("duplicate",true);return result;
         }
         UUID doc=UUID.randomUUID();
-        db.update("INSERT INTO source_document(id,project_id,title,content,content_hash,reference_date,timezone) VALUES(?,?,?,?,?,?,?)",
-            doc,projectId,input.title().strip(),content,hash,input.referenceDate(),project.get("timezone"));
+        db.update("INSERT INTO source_document(id,project_id,title,content,content_hash,reference_date,timezone,created_by) VALUES(?,?,?,?,?,?,?,?)",
+            doc,projectId,input.title().strip(),content,hash,input.referenceDate(),project.get("timezone"),access.userId());
         queue.enqueue(projectId,doc,input.referenceDate(),project.get("timezone").toString(),1);
         var result=document(doc);result.put("duplicate",false);return result;
     }
@@ -111,7 +114,7 @@ public class TraceFlowService {
     }
 
     public List<Map<String,Object>> documents(UUID projectId,int page,int size) {
-        one("SELECT id FROM project WHERE id=?",projectId);
+        access.require(projectId,false);
         if(page<0||size<1||size>100) throw new ApiException(400,"INVALID_PAGE","page从0开始，size为1到100");
         return db.queryForList("""
             SELECT d.id,d.project_id,d.title,d.reference_date,d.timezone,d.created_at,
@@ -131,6 +134,7 @@ public class TraceFlowService {
 
     public Map<String,Object> document(UUID id) {
         var result=view(one("SELECT * FROM source_document WHERE id=?",id));
+        access.require(uuid(result.get("project_id")),false);
         var jobs=db.queryForList("SELECT * FROM extraction_job WHERE document_id=? ORDER BY generation",id).stream().map(this::view).toList();
         for(var job:jobs){job.remove("lease_token");job.put("attempts",db.queryForList("SELECT attempt_no,status,error_code,started_at,completed_at,duration_ms,model,resolved_model,input_tokens,output_tokens FROM extraction_attempt WHERE job_id=? ORDER BY attempt_no",job.get("id")));}
         result.put("jobs",jobs);
@@ -170,18 +174,18 @@ public class TraceFlowService {
         }
         var after=one("SELECT * FROM task WHERE id=?",taskId);
         history(taskId,id,before,after,"REVIEWER");
-        db.update("UPDATE change_proposal SET status='APPLIED',applied_task_id=?,reviewed_json=?::jsonb,reviewed_at=now() WHERE id=?",
-            taskId,encode(input),id);
+        db.update("UPDATE change_proposal SET status='APPLIED',applied_task_id=?,reviewed_json=?::jsonb,reviewed_at=now(),reviewed_by=? WHERE id=?",
+            taskId,encode(input),access.userId(),id);
         return after;
     }
     @Transactional
     public Map<String,Object> reject(UUID id) {
         var row=lockProposal(id);
         if("APPLIED".equals(row.get("status"))) throw new ApiException(409,"PROPOSAL_CLOSED","建议已经应用");
-        db.update("UPDATE change_proposal SET status='REJECTED',reviewed_at=COALESCE(reviewed_at,now()) WHERE id=?",id);
+        db.update("UPDATE change_proposal SET status='REJECTED',reviewed_at=COALESCE(reviewed_at,now()),reviewed_by=COALESCE(reviewed_by,?) WHERE id=?",access.userId(),id);
         return view(one("SELECT * FROM change_proposal WHERE id=?",id));
     }
-    public Map<String,Object> task(UUID id) { return one("SELECT * FROM task WHERE id=?",id); }
+    public Map<String,Object> task(UUID id) { var row=one("SELECT * FROM task WHERE id=?",id);access.require(uuid(row.get("project_id")),false);return row; }
     @Transactional
     public Map<String,Object> editTask(UUID id,TaskInput input) {
         var initial=task(id);
@@ -193,13 +197,13 @@ public class TraceFlowService {
         var after=task(id); history(id,null,before,after,"MANUAL"); return after;
     }
     public List<Map<String,Object>> tasks(UUID project,int page,int size) {
-        one("SELECT id FROM project WHERE id=?",project);
+        access.require(project,false);
         if(page<0||size<1||size>100) throw new ApiException(400,"INVALID_PAGE","page从0开始，size为1到100");
         return db.queryForList("SELECT * FROM task WHERE project_id=? ORDER BY created_at,id LIMIT ? OFFSET ?",project,size,(long)page*size);
     }
     public List<Map<String,Object>> history(UUID id) {
         task(id);
-        return db.queryForList("SELECT h.*,j.document_id,p.evidence_json FROM task_change h LEFT JOIN change_proposal p ON p.id=h.proposal_id LEFT JOIN extraction_job j ON j.id=p.job_id WHERE h.task_id=? ORDER BY h.created_at,h.id",id)
+        return db.queryForList("SELECT h.*,u.username AS actor_username,j.document_id,p.evidence_json FROM task_change h LEFT JOIN app_user u ON u.id=h.actor_user_id LEFT JOIN change_proposal p ON p.id=h.proposal_id LEFT JOIN extraction_job j ON j.id=p.job_id WHERE h.task_id=? ORDER BY h.created_at,h.id",id)
             .stream().map(this::view).toList();
     }
 }
