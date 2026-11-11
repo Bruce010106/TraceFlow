@@ -1,0 +1,29 @@
+server:
+  address: 127.0.0.1
+  port: ${TRACEFLOW_PORT:8080}
+  error:
+    include-message: never
+spring:
+  config:
+    import: optional:file:.local/ai.properties
+  datasource:
+    url: ${TRACEFLOW_DB_URL:jdbc:postgresql://localhost:55432/traceflow}
+    username: ${TRACEFLOW_DB_USER:traceflow}
+    password: ${TRACEFLOW_DB_PASSWORD:}
+  flyway:
+    enabled: true
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+
+traceflow:
+  ai:
+    mode: ${TRACEFLOW_AI_MODE:llm}
+    base-url: ${TRACEFLOW_AI_BASE_URL:https://api.deepseek.com}
+    model: ${TRACEFLOW_AI_MODEL:deepseek-flash}
+    api-key: ${TRACEFLOW_AI_API_KEY:${DEEPSEEK_API_KEY:}}
+    response-format: ${TRACEFLOW_AI_RESPONSE_FORMAT:json_object}
+    token-limit-field: ${TRACEFLOW_AI_TOKEN_LIMIT_FIELD:max_tokens}
+    thinking-mode: ${TRACEFLOW_AI_THINKING_MODE:disabled}
+    timeout-seconds: ${TRACEFLOW_AI_TIMEOUT_SECONDS:45}
+    max-tokens: ${TRACEFLOW_AI_MAX_TOKENS:4096}

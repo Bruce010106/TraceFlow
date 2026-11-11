@@ -1,0 +1,52 @@
+[
+  {
+    "id": "create",
+    "input": "新增任务：接口联调；负责人：李明；截止：2026-11-12",
+    "expected": "1 CREATE_TASK"
+  },
+  {
+    "id": "two",
+    "input": "新增任务：接口联调；负责人：李明；截止：2026-11-12\n新增任务：接口文档；负责人：王芳；截止：2026-11-13",
+    "expected": "2 CREATE_TASK"
+  },
+  {
+    "id": "update",
+    "input": "更新任务：<当前项目任务UUID>；负责人：李明；截止：2026-11-15",
+    "expected": "1 UPDATE_TASK with current version"
+  },
+  {
+    "id": "empty-owner",
+    "input": "新增任务：接口联调；负责人：；截止：2026-11-12",
+    "expected": "1 CREATE_TASK; empty owner"
+  },
+  {
+    "id": "none",
+    "input": "今天没有新的任务。",
+    "expected": "SUCCEEDED; 0 proposals"
+  },
+  {
+    "id": "tentative",
+    "input": "可能延期到15日。",
+    "expected": "0 proposals: mock does not reason"
+  },
+  {
+    "id": "bad-date",
+    "input": "新增任务：接口联调；负责人：李明；截止：2026-99-10",
+    "expected": "400; no partial import"
+  },
+  {
+    "id": "foreign-task",
+    "input": "更新任务：<其他项目任务UUID>；负责人：李明；截止：2026-11-15",
+    "expected": "400; no partial import"
+  },
+  {
+    "id": "duplicate",
+    "input": "repeat create input with same project/referenceDate/timezone",
+    "expected": "same document; one job"
+  },
+  {
+    "id": "conflict",
+    "input": "approve update using stale expectedTaskVersion",
+    "expected": "409; PENDING; no task/history changes"
+  }
+]

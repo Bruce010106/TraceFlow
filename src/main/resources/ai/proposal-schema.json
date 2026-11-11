@@ -1,0 +1,86 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "proposals"
+  ],
+  "properties": {
+    "proposals": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operation",
+          "targetTaskId",
+          "title",
+          "assigneeName",
+          "dueDate",
+          "changedFields",
+          "evidence"
+        ],
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "CREATE_TASK",
+              "UPDATE_TASK"
+            ]
+          },
+          "targetTaskId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "assigneeName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dueDate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "changedFields": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "title",
+                "assigneeName",
+                "dueDate"
+              ]
+            }
+          },
+          "evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "line",
+              "quote"
+            ],
+            "properties": {
+              "line": {
+                "type": "integer"
+              },
+              "quote": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

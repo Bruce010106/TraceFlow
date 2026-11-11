@@ -1,0 +1,12 @@
+/target/
+/.idea/
+*.iml
+/.env
+/data/
+/*.log
+
+/.local/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/*.tsbuildinfo
+/src/main/resources/static/

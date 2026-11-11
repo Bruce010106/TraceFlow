@@ -1,0 +1,10 @@
+# Copy to .local/ai.properties; never commit the real key.
+traceflow.ai.mode=llm
+traceflow.ai.base-url=https://api.deepseek.com
+traceflow.ai.model=deepseek-flash
+traceflow.ai.response-format=json_object
+traceflow.ai.token-limit-field=max_tokens
+traceflow.ai.thinking-mode=disabled
+traceflow.ai.timeout-seconds=45
+traceflow.ai.max-tokens=4096
+traceflow.ai.api-key=
