@@ -1,6 +1,6 @@
 # TraceFlow
 
-P3 已接入 DeepSeek 真实自然语言抽取；项目空间、文档导入、建议审核、任务历史四个页面使用真实后端。模型只生成待审建议，任务仍由人工确认。
+P4 已加入 PostgreSQL 持久化队列、后台异步抽取、租约续期、自动重试与故障恢复；使用 DeepSeek 真实自然语言抽取。项目空间、文档导入、建议审核、任务历史四个页面使用真实后端。模型只生成待审建议，任务仍由人工确认。
 
 ## 开发启动（PowerShell 7）
 需要 PowerShell 7、Node.js 22.12+、JDK 17、Maven 3.9+。先配置本机 DEEPSEEK_API_KEY，或将 docs/ai.properties.example 复制为 .local/ai.properties 填写密钥（已被 Git 忽略）。在项目根目录开两个终端：
@@ -18,9 +18,9 @@ P3 已接入 DeepSeek 真实自然语言抽取；项目空间、文档导入、�
 ```
 将前端打包到Spring静态资源，再生成同源可执行JAR。生成的静态资源和node_modules不提交，克隆后先执行构建脚本。
 
-[P3 接入与事务说明](docs/P3.md) · [P3 验收记录](docs/P3-VERIFICATION.md) · [P2 页面说明](docs/P2.md)
+[P4 队列与恢复说明](docs/P4.md) · [P4 验收记录](docs/P4-VERIFICATION.md) · [P3 模型接入](docs/P3.md)
 
-当前流程：真实模型抽取 → 人工审核 → 任务更新 → 历史追溯。抽取失败保留原文，可在详情页明确重试。
+当前流程：原文与作业原子入队 → 后台抽取/续租/自动重试 → 人工审核 → 任务更新 → 历史追溯。导入立即返回 202，离开页面不影响处理；自动重试耗尽或不可重试的失败可明确发起新一轮。
 
 ## 环境
 Java 17、Maven 3.9+。运行服务需要 PostgreSQL 14+；集成测试会自行启动临时 PostgreSQL，不需要 Docker，不连接已有数据库。
@@ -54,7 +54,7 @@ docker compose up -d db
 ```
 
 已有专用开发数据库时，设置 TRACEFLOW_DB_URL、TRACEFLOW_DB_USER、TRACEFLOW_DB_PASSWORD。默认 JDBC URL 为 jdbc:postgresql://localhost:55432/traceflow。
-Flyway 启动时自动创建六张业务表并迁移模型审计字段。请仅指定 TraceFlow 的独立数据库。
+Flyway 启动时自动迁移业务、模型审计及队列尝试表。请仅指定 TraceFlow 的独立数据库。
 启动脚本默认 http://127.0.0.1:8091；直接使用 Maven 启动默认为 8080。当前未实现登录，仅用于本机开发。
 
 ## 运行完整 API 示例
@@ -62,7 +62,7 @@ Flyway 启动时自动创建六张业务表并迁移模型审计字段。请仅�
 ```powershell
 ./scripts/Smoke.ps1
 ```
-脚本默认连接启动脚本的 8091 端口，可传 -BaseUrl 修改；创建独立示例项目，真实模型模式发起两次抽取调用，验证自然语言、相对日期、文档去重、重复审核、冲突重审和来源历史，不操作已有项目。例子保留在开发库便于检查。
+脚本默认连接启动脚本的 8091 端口，可传 -BaseUrl 修改；创建独立示例项目，真实模型模式提交两份文档并等待后台终态（自动重试可能增加供应商调用次数），验证自然语言、相对日期、文档去重、重复审核、冲突重审和来源历史，不操作已有项目。例子保留在开发库便于检查。
 
 ## 离线模拟抽取协议（仅 -Mock 模式）
 仅显式启动 ./scripts/Start-Backend.ps1 -Temporary -Mock 时使用以下固定格式；默认真实模型可直接分析自然语言。
@@ -81,9 +81,9 @@ CREATE 审核不传 expectedTaskVersion；UPDATE 审核必须传当前任务版�
 - POST /api/projects — {name, timezone}
 - GET /api/projects — 项目列表和文档/任务/待审统计
 - GET /api/projects/{id}/documents?page=0&size=20 — 分页文档列表
-- POST /api/projects/{id}/documents — {title, content, referenceDate}
+- POST /api/projects/{id}/documents — {title, content, referenceDate}；202 表示原文和作业已入队
 - GET /api/documents/{id} — 不可变原文、作业、待审核建议
-- POST /api/documents/{id}/extract — 仅为 FAILED 文档创建新抽取尝试
+- POST /api/documents/{id}/extract — 202；仅为 FAILED 文档创建新一轮 QUEUED 作业
 - POST /api/proposals/{id}/approve — {title, assigneeName, dueDate, expectedTaskVersion?}
 - POST /api/proposals/{id}/reject
 - GET /api/projects/{id}/tasks?page=0&size=20
@@ -100,7 +100,7 @@ CREATE 审核不传 expectedTaskVersion；UPDATE 审核必须传当前任务版�
 [P0/P1 契约](docs/P0-P1.md) · [固定案例](docs/fixtures.json)
 真实 PostgreSQL 集成测试位于 src/test/java/dev/traceflow/WorkflowIntegrationTest.java。
 覆盖 HTTP 闭环、证据历史、去重、并发审核、并发版本竞争、冲突重审、跨项目隔离、事务故障回滚、拒绝终态和输入边界。
-P3 模型调用在数据库事务外同步执行，短事务保存原文和快照，再原子写入待审建议；失败留存并支持手动重试。P4 的队列、租约与崩溃恢复，以及登录尚未实现。
+P4 使用 PostgreSQL SKIP LOCKED 和过期令牌隔离提交，后台网络调用在事务外执行，自动恢复过期作业。外部模型为 at-least-once 调用，成功建议原子入库；人工审核、幂等和版本冲突仍保留。当前未实现登录。
 
 本机验证说明：临时测试库和临时演示入口使用 UTF-8/C locale，关闭仅回环连接的 SSL/GSS 协商以避开本机 JDBC 握手超时；这些参数不修改外部数据库连接配置。
 

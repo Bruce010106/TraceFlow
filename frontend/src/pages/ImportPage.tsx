@@ -4,7 +4,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { ArrowRight, FileText, LoaderCircle, Plus, UploadCloud, WandSparkles } from 'lucide-react';
 import { api } from '../api';
-import { DocumentBadge } from '../extraction';
+import { DocumentBadge, isExtractionActive } from '../extraction';
 import { useWorkspace } from '../App';
 import { Badge, Empty, ErrorPanel, Heading, Loading, Pagination, time, today } from '../components';
 function ImportForm() {
@@ -22,8 +22,8 @@ function ImportForm() {
   const [page, setPage] = useState(0);
   const reading = useRef(false);
   const [isReading, setIsReading] = useState(false);
-  const documents = useQuery({ queryKey: ['documents', project!.id, page], queryFn: () => api.documents(project!.id, page) });
-  const mutation = useMutation({ mutationFn: () => api.importDocument(project!.id, title.trim(), content, referenceDate), onSuccess: async doc => { await refresh(); notify(doc.duplicate ? '这份文档已存在，已打开原有记录。' : doc.jobs.at(-1)?.status === 'FAILED' ? '原文已归档，抽取未完成。请查看详情。' : doc.proposals.length ? '记录已归档，请核对抽取建议。' : '记录已归档，本次没有识别到任务建议。'); navigate('/projects/' + project!.id + '/review/' + doc.id); } });
+  const documents = useQuery({ queryKey: ['documents', project!.id, page], queryFn: () => api.documents(project!.id, page), refetchInterval: query => query.state.data?.some(doc => isExtractionActive(doc.extraction_status)) ? 1500 : false });
+  const mutation = useMutation({ mutationFn: () => api.importDocument(project!.id, title.trim(), content, referenceDate), onSuccess: async doc => { await refresh(); notify(doc.duplicate ? '这份文档已存在，已打开原有记录。' : doc.jobs.at(-1)?.status === 'FAILED' ? '原文已归档，抽取未完成。请查看详情。' : isExtractionActive(doc.jobs.at(-1)?.status) ? '原文已保存，作业已加入后台队列。' : doc.proposals.length ? '记录已归档，请核对抽取建议。' : '记录已归档，本次没有识别到任务建议。'); navigate('/projects/' + project!.id + '/review/' + doc.id); } });
   async function readFile(file?: File) {
     if (!file || reading.current) return;
     setFileError(null);
@@ -51,7 +51,7 @@ function ImportForm() {
         <textarea id="document-content" disabled={mutation.isPending} className="source-textarea" value={content} onChange={e => { setContent(e.target.value); setFileName(''); }} maxLength={10000} required placeholder="粘贴会议记录或变更说明，也可以先填入一条示例。"/>
         <div className="editor-footer"><span>{content.length.toLocaleString()} / 10,000 字符</span><span>时区：{project!.timezone}</span></div>
         {mutation.isError ? <ErrorPanel error={mutation.error}/> : null}
-        <div className="form-actions"><p className="subtle">导入只生成待审建议，任务由你确认后更新。</p><button className="button primary" disabled={mutation.isPending || isReading || !content.trim() || !title.trim() || !referenceDate}>{mutation.isPending ? <LoaderCircle size={17} className="spin"/> : <Plus size={17}/>}导入并生成建议<ArrowRight size={16}/></button></div>
+        <div className="form-actions"><p className="subtle">导入后后台处理，离开页面也会继续。任务由你确认后更新。</p><button className="button primary" disabled={mutation.isPending || isReading || !content.trim() || !title.trim() || !referenceDate}>{mutation.isPending ? <LoaderCircle size={17} className="spin"/> : <Plus size={17}/>}导入并生成建议<ArrowRight size={16}/></button></div>
       </form></section>
       <aside className="import-help"><div className="help-card"><span className="panel-symbol"><WandSparkles size={22}/></span><h3>{isMock ? '先试一条离线示例' : '用你的话，留下行动项'}</h3><p>{isMock ? '当前为显式启用的离线示例模式，仅识别固定格式。' : '模型结合记录日期与当前项目任务分析原文，提取新增或变更建议。没有明确行动项时，只保留原文。'}</p><div className="sample-code">{isMock ? <>新增任务：接口联调；<br/>负责人：李明；<br/>截止：{referenceDate}</> : <>请李明在 {referenceDate} 前完成接口联调。</>}</div><p className="field-hint">{isMock ? '每行一条，使用中文标点。' : '负责人、日期或任务指向不清楚时，请在审核中补充核对。模型建议可能有误。'}</p>{health.data && !health.data.configured ? <p className="inline-error">模型尚未配置，导入后会保留原文并提示重试。</p> : null}</div><div className="checklist"><h3>导入之后会发生什么？</h3>{['原文独立归档，保留记录日期', '建议附上原始引句与字段差异', '逐条确认后，再更新任务'].map((text, i) => <p key={text}><span>{i + 1}</span>{text}</p>)}</div></aside>
     </div>

@@ -27,3 +27,13 @@ traceflow:
     thinking-mode: ${TRACEFLOW_AI_THINKING_MODE:disabled}
     timeout-seconds: ${TRACEFLOW_AI_TIMEOUT_SECONDS:45}
     max-tokens: ${TRACEFLOW_AI_MAX_TOKENS:4096}
+
+  queue:
+    enabled: ${TRACEFLOW_QUEUE_ENABLED:true}
+    concurrency: ${TRACEFLOW_QUEUE_CONCURRENCY:2}
+    max-attempts: ${TRACEFLOW_QUEUE_MAX_ATTEMPTS:3}
+    poll-ms: ${TRACEFLOW_QUEUE_POLL_MS:500}
+    lease-seconds: ${TRACEFLOW_QUEUE_LEASE_SECONDS:30}
+    heartbeat-ms: ${TRACEFLOW_QUEUE_HEARTBEAT_MS:5000}
+    retry-base-ms: ${TRACEFLOW_QUEUE_RETRY_BASE_MS:2000}
+    retry-max-ms: ${TRACEFLOW_QUEUE_RETRY_MAX_MS:60000}

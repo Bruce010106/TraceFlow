@@ -16,10 +16,11 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-@SpringBootTest(properties="traceflow.ai.mode=mock")
+@SpringBootTest(properties={"traceflow.ai.mode=mock","traceflow.queue.enabled=false"})
+@org.springframework.test.annotation.DirtiesContext(classMode=org.springframework.test.annotation.DirtiesContext.ClassMode.AFTER_CLASS)
 @AutoConfigureMockMvc
 class WorkflowIntegrationTest {
- static final EmbeddedPostgres PG=start();
+ static final EmbeddedPostgres PG=TestDatabase.pg();
  static EmbeddedPostgres start() {
   try { return EmbeddedPostgres.builder().setPort(0).setPGStartupWait(java.time.Duration.ofSeconds(120)).setServerConfig("max_connections","20").setServerConfig("shared_buffers","16MB").setLocaleConfig("locale","C").setConnectConfig("sslmode","disable").setConnectConfig("gssEncMode","disable").start(); }
   catch(Exception e) { throw new ExceptionInInitializerError(e); }
@@ -29,21 +30,28 @@ class WorkflowIntegrationTest {
   registry.add("spring.datasource.username",()->"postgres");
   registry.add("spring.datasource.password",()->"");
  }
- @AfterAll static void stop() throws Exception { PG.close(); }
+
  @Autowired MockMvc mvc;
  @Autowired ObjectMapper json;
  @Autowired JdbcTemplate db;
  @Autowired TraceFlowService service;
+ @Autowired ExtractionQueue queue;
  @BeforeEach void clean() { db.execute("TRUNCATE task_change,change_proposal,extraction_job,source_document,task,project CASCADE"); }
  JsonNode send(org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder request,Object body,int status) throws Exception {
   if(body!=null) request.contentType("application/json").content(json.writeValueAsString(body));
-  return json.readTree(mvc.perform(request).andExpect(status().is(status)).andReturn().getResponse().getContentAsString());
+    JsonNode received=json.readTree(mvc.perform(request).andExpect(status().is(status)).andReturn().getResponse().getContentAsString());
+  if(status==202&&"QUEUED".equals(received.path("jobs").get(received.path("jobs").size()-1).path("status").asText())){
+   var lease=queue.claim("regression-driver").orElseThrow();queue.execute(lease);
+   var refreshed=send(get("/api/documents/"+received.path("id").asText()),null,200);
+   ((com.fasterxml.jackson.databind.node.ObjectNode)refreshed).set("duplicate",received.path("duplicate"));return refreshed;
+  }
+  return received;
  }
  String project() throws Exception {
   return send(post("/api/projects"),Map.of("name","Example","timezone","Asia/Hong_Kong"),200).get("id").asText();
  }
  JsonNode document(String project,String text) throws Exception {
-  return send(post("/api/projects/"+project+"/documents"),Map.of("title","纪要","content",text,"referenceDate","2026-11-10"),200);
+  return send(post("/api/projects/"+project+"/documents"),Map.of("title","纪要","content",text,"referenceDate","2026-11-10"),202);
  }
  Map<String,Object> approval(Long version) {
   var body=new HashMap<String,Object>();
@@ -116,7 +124,7 @@ class WorkflowIntegrationTest {
  }
  @Test void crossProjectTargetRetainsFailureWithoutChangingTasks() throws Exception {
   String first=project();String other=project();String task=createTask(first).get("id").asText();
-  var failed=send(post("/api/projects/"+other+"/documents"),Map.of("title","bad","content","更新任务："+task+"；负责人：李明；截止：2026-11-15","referenceDate","2026-11-10"),200);
+  var failed=send(post("/api/projects/"+other+"/documents"),Map.of("title","bad","content","更新任务："+task+"；负责人：李明；截止：2026-11-15","referenceDate","2026-11-10"),202);
   assertEquals("FAILED",failed.path("jobs").get(0).path("status").asText());
   assertEquals(2,count("source_document"));assertEquals(2,count("extraction_job"));assertEquals(1,count("change_proposal"));
  }
@@ -142,7 +150,7 @@ class WorkflowIntegrationTest {
   send(post("/api/projects"),Map.of("name","x","timezone","not-a-zone"),400);
   String id=project();
   send(post("/api/projects/"+id+"/documents"),Map.of("title","bad","content"," ","referenceDate","2026-11-10"),400);
-  var invalid=send(post("/api/projects/"+id+"/documents"),Map.of("title","bad","content","新增任务：接口联调；负责人：李明；截止：2026-99-10","referenceDate","2026-11-10"),200);
+  var invalid=send(post("/api/projects/"+id+"/documents"),Map.of("title","bad","content","新增任务：接口联调；负责人：李明；截止：2026-99-10","referenceDate","2026-11-10"),202);
   assertEquals("INVALID_MOCK_INPUT",invalid.path("jobs").get(0).path("error_code").asText());
   assertEquals(1,count("source_document"));assertEquals(0,count("change_proposal"));
   var empty=document(id,"今天没有新的任务。");
@@ -161,9 +169,9 @@ class WorkflowIntegrationTest {
  @Test void documentListAndWorkspaceCountsReflectReviews() throws Exception {
   String project=project();
   var input=Map.of("title","P2纪要","content","新增任务：接口联调；负责人：李明；截止：2026-11-12\n新增任务：接口文档；负责人：王芳；截止：2026-11-13","referenceDate","2026-11-11");
-  var doc=send(post("/api/projects/"+project+"/documents"),input,200);
+  var doc=send(post("/api/projects/"+project+"/documents"),input,202);
   assertFalse(doc.get("duplicate").asBoolean());
-  var duplicate=send(post("/api/projects/"+project+"/documents"),input,200);
+  var duplicate=send(post("/api/projects/"+project+"/documents"),input,202);
   assertTrue(duplicate.get("duplicate").asBoolean());
   var list=send(get("/api/projects/"+project+"/documents?size=1"),null,200);
   assertEquals(1,list.size()); assertEquals(2,list.get(0).get("proposal_count").asInt());

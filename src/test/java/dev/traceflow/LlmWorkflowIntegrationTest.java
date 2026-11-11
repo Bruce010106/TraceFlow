@@ -23,7 +23,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @SpringBootTest(properties={"traceflow.ai.mode=llm","traceflow.ai.api-key=integration-test-only",
-    "traceflow.ai.model=wire-test","traceflow.ai.response-format=json_object","traceflow.ai.timeout-seconds=15"})
+    "traceflow.queue.enabled=false","traceflow.ai.model=wire-test","traceflow.ai.response-format=json_object","traceflow.ai.timeout-seconds=15"})
+@org.springframework.test.annotation.DirtiesContext(classMode=org.springframework.test.annotation.DirtiesContext.ClassMode.AFTER_CLASS)
 @AutoConfigureMockMvc
 class LlmWorkflowIntegrationTest {
     record Reply(int status,String body,CountDownLatch entered,CountDownLatch release){}
@@ -33,7 +34,7 @@ class LlmWorkflowIntegrationTest {
     static final AtomicInteger CALLS=new AtomicInteger();
     static final ExecutorService HTTP_POOL=Executors.newCachedThreadPool();
     static final HttpServer HTTP=startHttp();
-    static final EmbeddedPostgres PG=startPostgres();
+    static final EmbeddedPostgres PG=TestDatabase.pg();
     static HttpServer startHttp(){
         try {
             var server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);server.setExecutor(HTTP_POOL);
@@ -65,19 +66,26 @@ class LlmWorkflowIntegrationTest {
         registry.add("spring.datasource.username",()->"postgres");registry.add("spring.datasource.password",()->"");
         registry.add("traceflow.ai.base-url",()->"http://127.0.0.1:"+HTTP.getAddress().getPort());
     }
-    @AfterAll static void stop()throws Exception{HTTP.stop(0);HTTP_POOL.shutdownNow();PG.close();}
+    @AfterAll static void stop()throws Exception{HTTP.stop(0);HTTP_POOL.shutdownNow();}
     @Autowired MockMvc mvc;@Autowired ObjectMapper json;@Autowired JdbcTemplate db;@Autowired TraceFlowService service;
+ @Autowired ExtractionQueue queue;
     @BeforeEach void clean(){
         REPLIES.clear();REQUESTS.clear();CALLS.set(0);
         db.execute("TRUNCATE task_change,change_proposal,extraction_job,source_document,task,project CASCADE");
     }
     JsonNode send(org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder request,Object body,int status)throws Exception{
         if(body!=null)request.contentType("application/json").content(json.writeValueAsString(body));
-        return json.readTree(mvc.perform(request).andExpect(status().is(status)).andReturn().getResponse().getContentAsString());
+          JsonNode received=json.readTree(mvc.perform(request).andExpect(status().is(status)).andReturn().getResponse().getContentAsString());
+  if(status==202&&"QUEUED".equals(received.path("jobs").get(received.path("jobs").size()-1).path("status").asText())){
+   var lease=queue.claim("regression-driver").orElseThrow();queue.execute(lease);
+   var refreshed=send(get("/api/documents/"+received.path("id").asText()),null,200);
+   ((com.fasterxml.jackson.databind.node.ObjectNode)refreshed).set("duplicate",received.path("duplicate"));return refreshed;
+  }
+  return received;
     }
     String project()throws Exception{return send(post("/api/projects"),Map.of("name","P3","timezone","Asia/Hong_Kong"),200).path("id").asText();}
     JsonNode document(String project,String content)throws Exception{
-        return send(post("/api/projects/"+project+"/documents"),Map.of("title","真实协议测试","content",content,"referenceDate","2026-11-11"),200);
+        return send(post("/api/projects/"+project+"/documents"),Map.of("title","真实协议测试","content",content,"referenceDate","2026-11-11"),202);
     }
     ObjectNode candidate(String title,String quote){
         var item=json.createObjectNode();item.put("operation","CREATE_TASK");item.putNull("targetTaskId");item.put("title",title);
@@ -126,9 +134,11 @@ class LlmWorkflowIntegrationTest {
     @Test void concurrentDuplicateImportMakesOnlyOneProviderRequest()throws Exception{
         String project=project(),text="请李明完成接口联调。";var entered=new CountDownLatch(1);var release=new CountDownLatch(1);
         REPLIES.add(new Reply(200,response(candidate("接口联调",text)),entered,release));
-        var pool=Executors.newSingleThreadExecutor();
+        var initial=service.importDocument(UUID.fromString(project),new Contracts.DocumentInput("纪要",text,LocalDate.of(2026,11,11)));
+        assertEquals("QUEUED",((Map<?,?>)((List<?>)initial.get("jobs")).get(0)).get("status"));assertEquals(0,CALLS.get());
+        var lease=queue.claim("concurrent-driver").orElseThrow();var pool=Executors.newSingleThreadExecutor();
         try{
-            var first=pool.submit(()->service.importDocument(UUID.fromString(project),new Contracts.DocumentInput("纪要",text,LocalDate.of(2026,11,11))));
+            var first=pool.submit(()->{queue.execute(lease);return service.document(lease.documentId());});
             assertTrue(entered.await(8,TimeUnit.SECONDS));
             var duplicate=document(project,text);assertTrue(duplicate.path("duplicate").asBoolean());
             assertEquals("RUNNING",job(duplicate).path("status").asText());assertEquals(1,count("source_document"));
@@ -142,13 +152,14 @@ class LlmWorkflowIntegrationTest {
         item.putNull("title");item.putNull("assigneeName");item.put("dueDate","2026-11-15");item.putArray("changedFields").add("dueDate");
         var entered=new CountDownLatch(1);var release=new CountDownLatch(1);
         REPLIES.add(new Reply(200,response(item),entered,release));var pool=Executors.newFixedThreadPool(2);
+        var initial=service.importDocument(UUID.fromString(project),new Contracts.DocumentInput("变更",text,LocalDate.of(2026,11,11)));
+        var lease=queue.claim("snapshot-driver").orElseThrow();
         try{
-            var extraction=pool.submit(()->service.importDocument(UUID.fromString(project),new Contracts.DocumentInput("变更",text,LocalDate.of(2026,11,11))));
+            var extraction=pool.submit(()->{queue.execute(lease);return service.document(lease.documentId());});
             assertTrue(entered.await(8,TimeUnit.SECONDS));
             var edit=pool.submit(()->service.editTask(UUID.fromString(id),new Contracts.TaskInput("接口联调","王敏",LocalDate.of(2026,11,16),Contracts.TaskStatus.IN_PROGRESS,0L)));
             assertEquals(1,((Number)edit.get(4,TimeUnit.SECONDS).get("version")).intValue());
-            release.countDown();
-            var source=json.valueToTree(extraction.get(8,TimeUnit.SECONDS));
+            release.countDown();var source=json.valueToTree(extraction.get(8,TimeUnit.SECONDS));
             assertEquals(0,source.path("proposals").get(0).path("base_task_version").asInt());
         }finally{release.countDown();pool.shutdownNow();}
     }
@@ -160,10 +171,10 @@ class LlmWorkflowIntegrationTest {
         assertEquals(0,count("change_proposal"));assertEquals(0,count("task"));
         document(project,text);assertEquals(1,CALLS.get());
         reply(candidate("接口联调",text));
-        var retried=send(post("/api/documents/"+source.path("id").asText()+"/extract"),null,200);
-        assertEquals(2,retried.path("jobs").size());assertEquals(2,job(retried).path("attempt_count").asInt());
+        var retried=send(post("/api/documents/"+source.path("id").asText()+"/extract"),null,202);
+        assertEquals(2,retried.path("jobs").size());assertEquals(2,job(retried).path("generation").asInt());assertEquals(1,job(retried).path("attempt_count").asInt());
         assertEquals("SUCCEEDED",job(retried).path("status").asText());assertEquals(1,count("change_proposal"));
-        send(post("/api/documents/"+source.path("id").asText()+"/extract"),null,200);
+        send(post("/api/documents/"+source.path("id").asText()+"/extract"),null,202);
         assertEquals(2,CALLS.get());assertEquals(2,count("extraction_job"));
     }
     @Test void crossProjectTargetNeverEntersProposalsOrContext()throws Exception{
@@ -178,7 +189,7 @@ class LlmWorkflowIntegrationTest {
         db.execute("CREATE TRIGGER test_proposal_failure BEFORE INSERT ON change_proposal FOR EACH ROW EXECUTE FUNCTION test_proposal_failure()");
         try{
             reply(candidate("接口联调",text),candidate("整理文档",text));var source=document(project,text);
-            assertEquals("FAILED",job(source).path("status").asText());assertEquals("EXTRACTION_INTERNAL_ERROR",job(source).path("error_code").asText());
+            assertEquals("RETRY_WAIT",job(source).path("status").asText());assertEquals("QUEUE_STORAGE_ERROR",job(source).path("error_code").asText());
             assertEquals(0,count("change_proposal"));assertEquals(0,count("task"));assertEquals(1,count("source_document"));
         }finally{db.execute("DROP TRIGGER test_proposal_failure ON change_proposal");db.execute("DROP FUNCTION test_proposal_failure()");}
     }

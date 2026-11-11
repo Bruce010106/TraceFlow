@@ -16,11 +16,10 @@ public class TraceFlowService {
     private final JdbcTemplate db;
     private final ObjectMapper json;
     private final TaskExtractor extractor;
-    private final ProposalValidator proposalValidator;
-    private final org.springframework.transaction.support.TransactionTemplate transactions;
-    public TraceFlowService(JdbcTemplate db,ObjectMapper json,TaskExtractor extractor,ProposalValidator proposalValidator,org.springframework.transaction.PlatformTransactionManager manager) {
-        this.db=db; this.json=json; this.extractor=extractor; this.proposalValidator=proposalValidator;
-        this.transactions=new org.springframework.transaction.support.TransactionTemplate(manager);
+    private final ExtractionQueue queue;
+    private final QueueProperties queueConfig;
+    public TraceFlowService(JdbcTemplate db,ObjectMapper json,TaskExtractor extractor,ExtractionQueue queue,QueueProperties queueConfig) {
+        this.db=db;this.json=json;this.extractor=extractor;this.queue=queue;this.queueConfig=queueConfig;
     }
     private Map<String,Object> one(String sql,Object... args) {
         var rows=db.queryForList(sql,args);
@@ -66,110 +65,49 @@ public class TraceFlowService {
             SELECT p.*,
               (SELECT count(*) FROM source_document d WHERE d.project_id=p.id) AS document_count,
               (SELECT count(*) FROM task t WHERE t.project_id=p.id AND t.archived_at IS NULL) AS task_count,
-              (SELECT count(*) FROM change_proposal c WHERE c.project_id=p.id AND c.status='PENDING') AS pending_count
+              (SELECT count(*) FROM change_proposal c WHERE c.project_id=p.id AND c.status='PENDING') AS pending_count,
+              (SELECT count(*) FROM extraction_job j JOIN source_document d ON d.id=j.document_id WHERE d.project_id=p.id AND j.status IN ('QUEUED','RUNNING','RETRY_WAIT')) AS active_job_count
             FROM project p ORDER BY p.created_at,p.id
             """);
     }
 
-    private record ExtractionWork(UUID projectId,UUID documentId,UUID jobId,TaskExtractor.Input input,boolean duplicate) {}
-
-    /** Short DB transaction -> bounded network call -> short DB transaction. */
-    @Transactional(propagation=org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
+    /** Only durable enqueueing happens in this request transaction. */
+    @Transactional
     public Map<String,Object> importDocument(UUID projectId,DocumentInput input) {
-        var work=transactions.execute(ignored->{
-            lockProject(projectId);
-            var project=one("SELECT * FROM project WHERE id=?",projectId);
-            String content=input.content().replace("\r\n","\n").replace("\r","\n");
-            String hash;
-            try {hash=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content.getBytes(StandardCharsets.UTF_8)));}
-            catch(Exception e){throw new IllegalStateException(e);}
-            var existing=db.queryForList("SELECT id FROM source_document WHERE project_id=? AND content_hash=? AND reference_date=? AND timezone=?",
-                projectId,hash,input.referenceDate(),project.get("timezone"));
-            if(!existing.isEmpty())return new ExtractionWork(projectId,uuid(existing.get(0).get("id")),null,null,true);
-            UUID doc=UUID.randomUUID();
-            db.update("INSERT INTO source_document(id,project_id,title,content,content_hash,reference_date,timezone) VALUES(?,?,?,?,?,?,?)",
-                doc,projectId,input.title().strip(),content,hash,input.referenceDate(),project.get("timezone"));
-            return startExtraction(projectId,doc,content,input.referenceDate(),project.get("timezone").toString(),1);
-        });
-        return runExtraction(Objects.requireNonNull(work));
-    }
-
-    @Transactional(propagation=org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
-    public Map<String,Object> retryExtraction(UUID documentId) {
-        var work=transactions.execute(ignored->{
-            var initial=one("SELECT project_id FROM source_document WHERE id=?",documentId);
-            UUID projectId=uuid(initial.get("project_id"));
-            lockProject(projectId);
-            var source=one("SELECT * FROM source_document WHERE id=?",documentId);
-            var latest=one("SELECT * FROM extraction_job WHERE document_id=? ORDER BY attempt_count DESC,created_at DESC,id DESC LIMIT 1",documentId);
-            if(!"FAILED".equals(latest.get("status")))return new ExtractionWork(projectId,documentId,null,null,true);
-            return startExtraction(projectId,documentId,source.get("content").toString(),
-                LocalDate.parse(source.get("reference_date").toString()),source.get("timezone").toString(),
-                ((Number)latest.get("attempt_count")).intValue()+1);
-        });
-        return runExtraction(Objects.requireNonNull(work));
-    }
-
-    private ExtractionWork startExtraction(UUID projectId,UUID doc,String content,LocalDate referenceDate,String timezone,int attempt) {
-        var tasks=db.queryForList("SELECT id,title,assignee_name,due_date,status,version FROM task WHERE project_id=? AND archived_at IS NULL ORDER BY created_at,id",projectId);
-        if(tasks.size()>50)throw new ApiException(400,"TASK_LIMIT","项目未归档任务超过50条");
-        UUID job=UUID.randomUUID();
-        var snapshot=Map.of("documentId",doc,"referenceDate",referenceDate,"timezone",timezone,"tasks",tasks);
-        db.update("""
-            INSERT INTO extraction_job(id,document_id,status,attempt_count,model,prompt_version,input_snapshot_json,provider)
-            VALUES(?,?,'RUNNING',?,?,?,?::jsonb,?)
-            """,job,doc,attempt,extractor.model(),extractor.promptVersion(),encode(snapshot),
-            extractor.provider());
-        return new ExtractionWork(projectId,doc,job,new TaskExtractor.Input(doc,content,referenceDate,timezone,tasks),false);
-    }
-
-    private Map<String,Object> runExtraction(ExtractionWork work) {
-        if(work.jobId()!=null) {
-            long started=System.nanoTime();
-            try {
-                var result=extractor.extract(work.input());
-                var proposals=proposalValidator.validate(work.input(),result.output());
-                transactions.executeWithoutResult(ignored->{
-                    lockProject(work.projectId());
-                    var job=one("SELECT status FROM extraction_job WHERE id=? FOR UPDATE",work.jobId());
-                    if(!"RUNNING".equals(job.get("status")))throw new ExtractionFailure("EXTRACTION_ALREADY_FINISHED");
-                    int ordinal=0;
-                    for(var proposal:proposals) {
-                        if(proposal.target()!=null) {
-                            var target=db.queryForList("SELECT id FROM task WHERE id=? AND project_id=? AND archived_at IS NULL",
-                                proposal.target(),work.projectId());
-                            if(target.isEmpty())throw new ExtractionFailure("MODEL_INVALID_TARGET");
-                        }
-                        var evidence=Map.of("blockId","line-"+proposal.line(),"quote",proposal.quote(),
-                            "fields",proposal.changedFields(),"source","mock".equals(extractor.mode())?"MOCK":"LLM");
-                        db.update("""
-                            INSERT INTO change_proposal(id,job_id,project_id,ordinal,operation,target_task_id,base_task_version,candidate_json,evidence_json)
-                            VALUES(?,?,?,?,?,?,?,?::jsonb,?::jsonb)
-                            """,UUID.randomUUID(),work.jobId(),work.projectId(),ordinal++,
-                            proposal.target()==null?"CREATE_TASK":"UPDATE_TASK",proposal.target(),proposal.baseVersion(),
-                            encode(fields(proposal.title(),proposal.owner(),proposal.dueDate())),encode(evidence));
-                    }
-                    db.update("""
-                        UPDATE extraction_job SET status='SUCCEEDED',resolved_model=?,response_id=?,input_tokens=?,output_tokens=?,
-                          duration_ms=?,completed_at=now(),output_json=?::jsonb,error_code=NULL WHERE id=?
-                        """,result.resolvedModel(),result.responseId(),result.inputTokens(),result.outputTokens(),
-                        result.durationMs(),encode(result.output()),work.jobId());
-                });
-            } catch(RuntimeException failure) {
-                String code=failure instanceof ExtractionFailure known?known.code():"EXTRACTION_INTERNAL_ERROR";
-                long elapsed=java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-started);
-                transactions.executeWithoutResult(ignored->db.update("""
-                    UPDATE extraction_job SET status='FAILED',error_code=?,duration_ms=?,completed_at=now()
-                    WHERE id=? AND status='RUNNING'
-                    """,code,elapsed,work.jobId()));
-            }
+        lockProject(projectId);
+        var project=one("SELECT * FROM project WHERE id=?",projectId);
+        String content=input.content().replace("\r\n","\n").replace("\r","\n");
+        String hash;
+        try{hash=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content.getBytes(StandardCharsets.UTF_8)));}
+        catch(Exception e){throw new IllegalStateException(e);}
+        var existing=db.queryForList("SELECT id FROM source_document WHERE project_id=? AND content_hash=? AND reference_date=? AND timezone=?",
+            projectId,hash,input.referenceDate(),project.get("timezone"));
+        if(!existing.isEmpty()){
+            var result=document(uuid(existing.get(0).get("id")));result.put("duplicate",true);return result;
         }
-        var result=document(work.documentId());result.put("duplicate",work.duplicate());return result;
+        UUID doc=UUID.randomUUID();
+        db.update("INSERT INTO source_document(id,project_id,title,content,content_hash,reference_date,timezone) VALUES(?,?,?,?,?,?,?)",
+            doc,projectId,input.title().strip(),content,hash,input.referenceDate(),project.get("timezone"));
+        queue.enqueue(projectId,doc,input.referenceDate(),project.get("timezone").toString(),1);
+        var result=document(doc);result.put("duplicate",false);return result;
+    }
+
+    /** Manual retry starts a new generation only after the previous one is terminal FAILED. */
+    @Transactional
+    public Map<String,Object> retryExtraction(UUID documentId) {
+        UUID projectId=uuid(one("SELECT project_id FROM source_document WHERE id=?",documentId).get("project_id"));
+        lockProject(projectId);
+        var source=one("SELECT * FROM source_document WHERE id=?",documentId);
+        var latest=one("SELECT * FROM extraction_job WHERE document_id=? ORDER BY generation DESC LIMIT 1 FOR UPDATE",documentId);
+        boolean duplicate=!"FAILED".equals(latest.get("status"));
+        if(!duplicate)queue.enqueue(projectId,documentId,LocalDate.parse(source.get("reference_date").toString()),
+            source.get("timezone").toString(),((Number)latest.get("generation")).intValue()+1);
+        var result=document(documentId);result.put("duplicate",duplicate);return result;
     }
 
     public Map<String,Object> extractorInfo() {
         return Map.of("provider",extractor.provider(),"extractor",extractor.mode(),"model",extractor.model(),
-            "configured",extractor.configured(),"promptVersion",extractor.promptVersion());
+            "configured",extractor.configured(),"promptVersion",extractor.promptVersion(),"queueEnabled",queueConfig.isEnabled());
     }
 
     public List<Map<String,Object>> documents(UUID projectId,int page,int size) {
@@ -179,8 +117,8 @@ public class TraceFlowService {
             SELECT d.id,d.project_id,d.title,d.reference_date,d.timezone,d.created_at,
                    count(p.id) AS proposal_count,
                    count(p.id) FILTER (WHERE p.status='PENDING') AS pending_count,
-                   (SELECT j.status FROM extraction_job j WHERE j.document_id=d.id ORDER BY j.attempt_count DESC,j.created_at DESC,j.id DESC LIMIT 1) AS extraction_status,
-                   (SELECT j.error_code FROM extraction_job j WHERE j.document_id=d.id ORDER BY j.attempt_count DESC,j.created_at DESC,j.id DESC LIMIT 1) AS extraction_error
+                   (SELECT j.status FROM extraction_job j WHERE j.document_id=d.id ORDER BY j.generation DESC LIMIT 1) AS extraction_status,
+                   (SELECT j.error_code FROM extraction_job j WHERE j.document_id=d.id ORDER BY j.generation DESC LIMIT 1) AS extraction_error
             FROM source_document d
             LEFT JOIN extraction_job j ON j.document_id=d.id
             LEFT JOIN change_proposal p ON p.job_id=j.id
@@ -193,8 +131,10 @@ public class TraceFlowService {
 
     public Map<String,Object> document(UUID id) {
         var result=view(one("SELECT * FROM source_document WHERE id=?",id));
-        result.put("jobs",db.queryForList("SELECT * FROM extraction_job WHERE document_id=? ORDER BY attempt_count,created_at,id",id).stream().map(this::view).toList());
-        result.put("proposals",db.queryForList("SELECT p.* FROM change_proposal p JOIN extraction_job j ON j.id=p.job_id WHERE j.document_id=? ORDER BY j.attempt_count,j.created_at,p.ordinal",id).stream().map(this::view).toList());
+        var jobs=db.queryForList("SELECT * FROM extraction_job WHERE document_id=? ORDER BY generation",id).stream().map(this::view).toList();
+        for(var job:jobs){job.remove("lease_token");job.put("attempts",db.queryForList("SELECT attempt_no,status,error_code,started_at,completed_at,duration_ms,model,resolved_model,input_tokens,output_tokens FROM extraction_attempt WHERE job_id=? ORDER BY attempt_no",job.get("id")));}
+        result.put("jobs",jobs);
+        result.put("proposals",db.queryForList("SELECT p.* FROM change_proposal p JOIN extraction_job j ON j.id=p.job_id WHERE j.document_id=? ORDER BY j.generation,p.ordinal",id).stream().map(this::view).toList());
         return result;
     }
     private Map<String,Object> lockProposal(UUID id) {

@@ -12,7 +12,7 @@ import { TasksPage } from './pages/TasksPage';
 export interface Workspace { projects: Project[]; project?: Project; notify: (message: string) => void; refresh: () => Promise<void> }
 export const useWorkspace = () => useOutletContext<Workspace>();
 function Shell() {
-  const query = useQuery({ queryKey: ['projects'], queryFn: api.projects });
+  const query = useQuery({ queryKey: ['projects'], queryFn: api.projects, refetchInterval: query => query.state.data?.some(project => project.active_job_count > 0) ? 1500 : false });
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, refetchInterval: 15000 });
   const cache = useQueryClient();
   const navigate = useNavigate();

@@ -1,10 +1,10 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, ArrowRight, Check, CheckCircle2, Copy, FileText, History, LoaderCircle, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import { ApiError, api } from '../api';
-import { DocumentBadge, ExtractionStatus } from '../extraction';
+import { DocumentBadge, ExtractionStatus, isExtractionActive } from '../extraction';
 import { useWorkspace } from '../App';
 import { Badge, date, Empty, ErrorPanel, Heading, Loading, Pagination, time } from '../components';
 import type { Proposal, SourceDocument, TaskFields } from '../types';
@@ -12,7 +12,7 @@ import type { Proposal, SourceDocument, TaskFields } from '../types';
 function ReviewInbox() {
   const { project } = useWorkspace();
   const [page, setPage] = useState(0);
-  const docs = useQuery({ queryKey: ['documents', project!.id, page], queryFn: () => api.documents(project!.id, page) });
+  const docs = useQuery({ queryKey: ['documents', project!.id, page], queryFn: () => api.documents(project!.id, page), refetchInterval: query => query.state.data?.some(doc => isExtractionActive(doc.extraction_status)) ? 1500 : false });
   return <>
     <Heading eyebrow="REVIEW WITH CONTEXT" title="建议审核" description="先看证据，再做决定。选择一份记录，继续核对它的任务建议。" action={<Link className="button primary" to={'/projects/' + project!.id + '/import'}>导入新文档<ArrowRight size={16}/></Link>}/>
     <div className="review-intro"><span className="panel-symbol"><ShieldCheck size={25}/></span><div><h2>{project!.pending_count ? project!.pending_count + ' 条建议，等待你的确认' : '每条变更，都由你确认'}</h2><p>文档是依据，建议是起点。未经确认的内容，不会改动任务。</p></div></div>
@@ -93,7 +93,9 @@ function DocumentReview({ id }: { id: string }) {
   const navigate = useNavigate();
   const [selectedId, setSelectedId] = useState('');
   const query = useQuery({ queryKey: ['document', id], queryFn: () => api.document(id), refetchInterval: query => ['RUNNING', 'QUEUED', 'RETRY_WAIT'].includes(query.state.data?.jobs.at(-1)?.status || '') ? 1500 : false });
-  const retry = useMutation({ mutationFn: () => api.retryExtraction(id), onSuccess: async doc => { cache.setQueryData(['document', id], doc); await refreshWorkspace(); notify(doc.jobs.at(-1)?.status === 'FAILED' ? '抽取仍未完成，原文已保留。' : doc.jobs.at(-1)?.status === 'SUCCEEDED' ? '抽取已完成，请核对本次建议。' : '抽取正在进行，完成后会自动显示。'); } });
+  const retry = useMutation({ mutationFn: () => api.retryExtraction(id), onSuccess: async doc => { cache.setQueryData(['document', id], doc); await refreshWorkspace(); notify(doc.jobs.at(-1)?.status === 'FAILED' ? '抽取仍未完成，原文已保留。' : doc.jobs.at(-1)?.status === 'SUCCEEDED' ? '抽取已完成，请核对本次建议。' : '作业已加入后台队列，完成后会自动显示。'); } });
+  const latestStatus = query.data?.jobs.at(-1)?.status;
+  useEffect(() => { if (latestStatus === 'SUCCEEDED' || latestStatus === 'FAILED') { void cache.invalidateQueries({ queryKey: ['projects'] }); void cache.invalidateQueries({ queryKey: ['documents'] }); } }, [cache, id, latestStatus]);
   if (query.isPending) return <Loading text="正在打开原文与审核建议…"/>;
   if (query.isError) return <ErrorPanel error={query.error} retry={() => { void query.refetch(); }}/>;
   const document = query.data;
@@ -106,10 +108,10 @@ function DocumentReview({ id }: { id: string }) {
   const refresh = async () => { if (selected) setSelectedId(selected.id); await query.refetch(); };
   return <>
     <Heading eyebrow="EVIDENCE BEFORE ACTION" title="建议审核" description="把原文放在手边，让每次确认都更有把握。" action={<Link className="button secondary" to={'/projects/' + project!.id + '/review'}><ArrowLeft size={15}/>全部文档</Link>}/>
-    <div className="document-bar"><span className="document-icon"><FileText size={21}/></span><div><strong>{document.title}</strong><p>记录日期 {document.reference_date} · 导入于 {time(document.created_at, project!.timezone)}</p></div><Badge tone={job?.status === 'FAILED' ? 'red' : running || pending ? 'amber' : 'green'}>{running ? '正在抽取' : job?.status === 'FAILED' ? '抽取未完成' : pending ? pending + ' 条待审核' : document.proposals.length ? '审核已完成' : '无需审核'}</Badge></div>
-    <ExtractionStatus job={job} onRetry={() => retry.mutate()} pending={retry.isPending}/>{retry.isError ? <ErrorPanel error={retry.error}/> : null}
+    <div className="document-bar"><span className="document-icon"><FileText size={21}/></span><div><strong>{document.title}</strong><p>记录日期 {document.reference_date} · 导入于 {time(document.created_at, project!.timezone)}</p></div><Badge tone={job?.status === 'FAILED' ? 'red' : running || pending ? 'amber' : 'green'}>{job?.status === 'QUEUED' ? '已排队' : job?.status === 'RETRY_WAIT' ? '等待重试' : running ? '后台抽取中' : job?.status === 'FAILED' ? '抽取未完成' : pending ? pending + ' 条待审核' : document.proposals.length ? '审核已完成' : '无需审核'}</Badge></div>
+    <ExtractionStatus job={job} onRetry={() => retry.mutate()} pending={retry.isPending} timezone={project!.timezone}/>{retry.isError ? <ErrorPanel error={retry.error}/> : null}
     <div className="review-grid"><section className="panel source-panel"><div className="section-heading"><h2>文档原文</h2><button className="icon-button" aria-label="复制原文" onClick={() => { void navigator.clipboard.writeText(document.content).then(() => notify('原文已复制。')).catch(() => notify('无法复制，请手动选择原文。')); }}><Copy size={16}/></button></div><div className="source-lines" aria-label="审核原文">{document.content.split('\n').map((text, index) => <div key={index} className={index + 1 === line ? 'highlight-line' : ''}><span className="line-number" aria-hidden="true">{(index + 1).toString().padStart(2, '0')}</span><span>{text || ' '}</span></div>)}</div>{selected ? <div className="source-citation"><Badge tone="green">原文依据 · 第 {line} 行</Badge><blockquote>{selected.evidence_json.quote}</blockquote><p>高亮内容对应当前选中的建议。</p></div> : null}</section>
-    <section className="panel review-panel">{document.proposals.length ? <><div className="proposal-strip" aria-label="建议列表">{document.proposals.map((proposal, index) => <button key={proposal.id} className={'proposal-tab ' + (selected?.id === proposal.id ? 'selected' : '')} aria-pressed={selected?.id === proposal.id} onClick={() => setSelectedId(proposal.id)}><span>建议 {(index + 1).toString().padStart(2, '0')}</span><Badge tone={proposal.status === 'PENDING' ? 'amber' : proposal.status === 'APPLIED' ? 'green' : 'neutral'}>{proposal.status === 'PENDING' ? '待审核' : proposal.status === 'APPLIED' ? '已确认' : '已拒绝'}</Badge></button>)}</div><ReviewEditor key={selected.id} proposal={selected} document={document} onRefresh={refresh}/></> : <Empty title={running ? '正在抽取任务建议' : job?.status === 'FAILED' ? '本次没有生成可审核建议' : '这份记录没有任务建议'} description={running ? '模型正在分析原文，页面会自动更新。' : job?.status === 'FAILED' ? '请先查看上方提示，完成重新抽取后再审核。' : '原文已保存。本次没有识别到明确的行动项，你可以补充记录后重新导入。'} action={<button className="button secondary" onClick={() => navigate('/projects/' + project!.id + '/import')}>返回文档导入<ArrowRight size={16}/></button>}/>}</section></div>
+    <section className="panel review-panel">{document.proposals.length ? <><div className="proposal-strip" aria-label="建议列表">{document.proposals.map((proposal, index) => <button key={proposal.id} className={'proposal-tab ' + (selected?.id === proposal.id ? 'selected' : '')} aria-pressed={selected?.id === proposal.id} onClick={() => setSelectedId(proposal.id)}><span>建议 {(index + 1).toString().padStart(2, '0')}</span><Badge tone={proposal.status === 'PENDING' ? 'amber' : proposal.status === 'APPLIED' ? 'green' : 'neutral'}>{proposal.status === 'PENDING' ? '待审核' : proposal.status === 'APPLIED' ? '已确认' : '已拒绝'}</Badge></button>)}</div><ReviewEditor key={selected.id} proposal={selected} document={document} onRefresh={refresh}/></> : <Empty title={running ? '正在抽取任务建议' : job?.status === 'FAILED' ? '本次没有生成可审核建议' : '这份记录没有任务建议'} description={running ? '后台处理会继续进行，页面会自动更新。' : job?.status === 'FAILED' ? '请先查看上方提示，完成重新抽取后再审核。' : '原文已保存。本次没有识别到明确的行动项，你可以补充记录后重新导入。'} action={<button className="button secondary" onClick={() => navigate('/projects/' + project!.id + '/import')}>返回文档导入<ArrowRight size={16}/></button>}/>}</section></div>
   </>;
 }
 export function ReviewPage() {
